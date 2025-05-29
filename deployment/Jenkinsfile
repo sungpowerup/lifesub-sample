@@ -83,7 +83,7 @@ testcontainers.reuse.enable=true'''
 
                         # Member 서비스
                         ./gradlew :member:test :member:jacocoTestReport :member:sonar \
-                            -Dsonar.projectKey=lifesub-member-dg0400 \
+                            -Dsonar.projectKey=lifesub-member-dg0404 \
                             -Dsonar.projectName=lifesub-member \
                             -Dsonar.java.binaries=build/classes/java/main \
                             -Dsonar.coverage.jacoco.xmlReportPaths=build/reports/jacoco/test/jacocoTestReport.xml \
@@ -91,7 +91,7 @@ testcontainers.reuse.enable=true'''
 
                         # Recommend 서비스
                         ./gradlew :recommend:test :recommend:jacocoTestReport :recommend:sonar \
-                            -Dsonar.projectKey=lifesub-recommend-dg0400 \
+                            -Dsonar.projectKey=lifesub-recommend-dg0404 \
                             -Dsonar.projectName=lifesub-recommend \
                             -Dsonar.java.binaries=build/classes/java/main \
                             -Dsonar.coverage.jacoco.xmlReportPaths=build/reports/jacoco/test/jacocoTestReport.xml \
@@ -99,7 +99,7 @@ testcontainers.reuse.enable=true'''
 
                         # Mysub 서비스 (biz & infra 구조)
                         ./gradlew :mysub-infra:test :mysub-infra:jacocoTestReport :mysub-infra:sonar \
-                            -Dsonar.projectKey=lifesub-mysub-dg0400 \
+                            -Dsonar.projectKey=lifesub-mysub-dg0404 \
                             -Dsonar.projectName=lifesub-mysub \
                             -Dsonar.java.binaries=build/classes/java/main \
                             -Dsonar.coverage.jacoco.xmlReportPaths=build/reports/jacoco/test/jacocoTestReport.xml \
