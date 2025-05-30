@@ -20,7 +20,12 @@ podTemplate(
                             envVar(key: 'TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE', value: '/run/podman/podman.sock'),
                             envVar(key: 'TESTCONTAINERS_RYUK_DISABLED', value: 'true')
                         ]),
-        containerTemplate(name: 'git', image: 'alpine/git:latest', command: 'cat', ttyEnabled: true)
+        containerTemplate(
+            name: 'git-client', 
+            image: 'alpine/git:latest', 
+            command: 'cat', 
+            ttyEnabled: true
+        )
     ],
     volumes: [
         emptyDirVolume(mountPath: '/home/gradle/.gradle', memory: false),
@@ -117,13 +122,18 @@ testcontainers.reuse.enable=true'''
                         def jarFile = service == 'mysub' ? 'mysub.jar' : "${service}.jar"
 
                         sh """
+                            echo "Building image for service: ${service}"
+                            
                             podman build \
                                 --build-arg BUILD_LIB_DIR="${buildDir}/build/libs" \
                                 --build-arg ARTIFACTORY_FILE="${jarFile}" \
                                 -f deployment/container/Dockerfile \
                                 -t ${props.registry}/${props.image_org}/${service}:${imageTag} .
 
+                            echo "Pushing image for service: ${service}"
                             podman push ${props.registry}/${props.image_org}/${service}:${imageTag}
+                            
+                            echo "Successfully pushed: ${props.registry}/${props.image_org}/${service}:${imageTag}"
                         """
                     }
                 }
@@ -131,33 +141,75 @@ testcontainers.reuse.enable=true'''
         }
 
         stage('Update Manifest Repository') {
-            container('git') {
-                withCredentials([gitUsernamePassword(credentialsId: 'github-credentials-unicorn')]) {
+            container('git-client') {
+                withCredentials([gitUsernamePassword(credentialsId: 'github-credentials-dg0404')]) {
                     sh """
-                        git config --global user.email "jenkins@unicorn.com"
-                        git config --global user.name "Jenkins CI"
+                        echo "Updating manifest repository for ArgoCD..."
                         
-                        # Clone manifest repository
+                        # Git 설정
+                        git config --global user.email "jenkins@dg0404.com"
+                        git config --global user.name "Jenkins CI DG0404"
+                        git config --global --add safe.directory '*'
+                        
+                        # Manifest repository 클론
                         git clone ${manifestRepo} ${manifestDir}
                         cd ${manifestDir}
                         
-                        # Update each service deployment
+                        # 현재 브랜치 확인
+                        echo "Current branch and status:"
+                        git branch -a
+                        git status
+                        
+                        # 각 서비스 deployment 업데이트
                         for service in ${services.join(' ')}; do
                             deploymentFile="lifesub/\${service}/\${service}-deployment.yaml"
+                            echo "Processing deployment file: \$deploymentFile"
+                            
                             if [ -f "\$deploymentFile" ]; then
-                                # Update image tag in deployment yaml
+                                echo "Found deployment file: \$deploymentFile"
+                                
+                                # 현재 이미지 태그 확인
+                                echo "Current image configuration:"
+                                grep "image:" \$deploymentFile || echo "No image configuration found"
+                                
+                                # 이미지 태그 업데이트
                                 sed -i "s|image: ${props.registry}/${props.image_org}/\${service}:.*|image: ${props.registry}/${props.image_org}/\${service}:${imageTag}|g" \$deploymentFile
-                                echo "Updated \$deploymentFile with new image tag: ${imageTag}"
+                                
+                                echo "=== Updated \$deploymentFile ==="
                                 cat \$deploymentFile
+                                echo "================================"
                             else
                                 echo "Warning: \$deploymentFile not found"
+                                echo "Available structure:"
+                                find lifesub -name "*deployment*.yaml" -type f 2>/dev/null || echo "No deployment files found"
                             fi
                         done
                         
-                        # Commit and push changes
+                        # 변경사항 확인
+                        echo "Git status after changes:"
+                        git status
+                        git diff --name-only
+                        
+                        # 변경사항 커밋 및 푸시
                         git add .
-                        git commit -m "Update backend services image tag to ${imageTag}" || echo "No changes to commit"
-                        git push origin main
+                        if git diff --staged --quiet; then
+                            echo "No changes to commit"
+                        else
+                            echo "Committing changes..."
+                            git commit -m "Update backend services image tag to ${imageTag}
+
+Build: ${env.BUILD_NUMBER}
+Services: ${services.join(', ')}
+Registry: ${props.registry}/${props.image_org}
+Tag: ${imageTag}
+
+Updated by Jenkins CI for ArgoCD deployment"
+                            
+                            echo "Pushing changes to manifest repository..."
+                            git push origin main
+                            echo "✅ Changes pushed successfully to manifest repository"
+                            echo "🚀 ArgoCD will automatically detect and deploy these changes"
+                        fi
                     """
                 }
             }
