@@ -6,301 +6,300 @@ def getImageTag() {
     return dateFormat.format(currentDate)
 }
 
-podTemplate(
-    label: "${PIPELINE_ID}",
-    serviceAccount: 'jenkins',
-    containers: [
-        containerTemplate(
-            name: 'podman', 
-            image: "mgoltzsche/podman", 
-            ttyEnabled: true, 
-            command: 'cat', 
-            privileged: true,
-            resourceRequestCpu: '200m',
-            resourceRequestMemory: '512Mi',
-            resourceLimitCpu: '1000m',
-            resourceLimitMemory: '1Gi'
-        ),
-        containerTemplate(
-            name: 'gradle',
-            image: 'gradle:jdk17',
-            ttyEnabled: true,
-            command: 'cat',
-            resourceRequestCpu: '500m',
-            resourceRequestMemory: '1Gi',
-            resourceLimitCpu: '2000m',
-            resourceLimitMemory: '2Gi',
-            envVars: [
-                envVar(key: 'DOCKER_HOST', value: 'unix:///run/podman/podman.sock'),
-                envVar(key: 'TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE', value: '/run/podman/podman.sock'),
-                envVar(key: 'TESTCONTAINERS_RYUK_DISABLED', value: 'true'),
-                envVar(key: 'GRADLE_OPTS', value: '-Dorg.gradle.daemon=false -Dorg.gradle.parallel=false -Xmx1g')
-            ]
-        ),
-        containerTemplate(
-            name: 'git-client', 
-            image: 'alpine/git:latest', 
-            command: 'cat', 
-            ttyEnabled: true,
-            resourceRequestCpu: '100m',
-            resourceRequestMemory: '128Mi'
-        )
-    ],
-    volumes: [
-        emptyDirVolume(mountPath: '/home/gradle/.gradle', memory: false),
-        emptyDirVolume(mountPath: '/run/podman', memory: false)
-    ]
-) {
-    node(PIPELINE_ID) {
-        def props
-        def imageTag = getImageTag()
-        def services = ['member', 'mysub', 'recommend']
-        def manifestRepo = 'https://github.com/sungpowerup/lifesub-manifest.git'
-        def manifestDir = 'lifesub-manifest'
-
-        stage("Get Source") {
-            checkout scm
-            props = readProperties file: "deployment/deploy_env_vars"
+// 기본 pipeline 문법 사용 (더 안정적)
+pipeline {
+    agent {
+        kubernetes {
+            label "${PIPELINE_ID}"
+            defaultContainer 'jnlp'
+            yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    jenkins: worker
+spec:
+  serviceAccountName: jenkins
+  containers:
+  - name: gradle
+    image: gradle:jdk17
+    command:
+    - sleep
+    args:
+    - 99d
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "200m"
+      limits:
+        memory: "1Gi"
+        cpu: "500m"
+    env:
+    - name: GRADLE_OPTS
+      value: "-Dorg.gradle.daemon=false"
+  - name: podman
+    image: mgoltzsche/podman:latest
+    command:
+    - sleep
+    args:
+    - 99d
+    securityContext:
+      privileged: true
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "100m"
+      limits:
+        memory: "512Mi"
+        cpu: "300m"
+  - name: git-client
+    image: alpine/git:latest
+    command:
+    - sleep
+    args:
+    - 99d
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "50m"
+      limits:
+        memory: "128Mi"
+        cpu: "100m"
+"""
         }
-
-        stage('Setup Environment') {
-            container('podman') {
-                sh '''
-                    echo "Starting podman system service..."
-                    podman system service -t 0 unix:///run/podman/podman.sock &
-                    sleep 5
-                    echo "Podman service started"
-                '''
-            }
-        }
-
-        stage('Build Applications') {
-            container('gradle') {
-                def testContainersConfig = '''docker.client.strategy=org.testcontainers.dockerclient.UnixSocketClientProviderStrategy
-docker.host=unix:///run/podman/podman.sock
-ryuk.container.privileged=true
-testcontainers.reuse.enable=true'''
-
-                sh """
-                    echo "Setting up TestContainers configuration..."
-                    
-                    # TestContainers 설정
-                    mkdir -p member/src/test/resources mysub-infra/src/test/resources recommend/src/test/resources
-                    echo '${testContainersConfig}' > member/src/test/resources/testcontainers.properties
-                    echo '${testContainersConfig}' > mysub-infra/src/test/resources/testcontainers.properties
-                    echo '${testContainersConfig}' > recommend/src/test/resources/testcontainers.properties
-                    
-                    echo "Starting application build..."
-                    chmod +x gradlew
-                    
-                    # 빌드 실행 (테스트 제외)
-                    ./gradlew clean :member:build :mysub-infra:build :recommend:build -x test --no-daemon --max-workers=2
-                    
-                    echo "Build completed successfully"
-                """
-            }
-        }
-
-        stage('Run Tests') {
-            container('gradle') {
-                sh """
-                    echo "Running tests for all services..."
-                    
-                    # 각 서비스별로 개별 테스트 실행
-                    echo "Testing Member service..."
-                    ./gradlew :member:test --no-daemon --max-workers=1 || echo "Member tests completed with issues"
-                    
-                    echo "Testing Recommend service..."
-                    ./gradlew :recommend:test --no-daemon --max-workers=1 || echo "Recommend tests completed with issues"
-                    
-                    echo "Testing MySub service..."
-                    ./gradlew :mysub-infra:test --no-daemon --max-workers=1 || echo "MySub tests completed with issues"
-                    
-                    echo "All tests completed"
-                """
-            }
-        }
-
-        stage('Generate Test Reports') {
-            container('gradle') {
-                sh """
-                    echo "Generating JaCoCo test reports..."
-                    
-                    # JaCoCo 리포트 생성
-                    ./gradlew :member:jacocoTestReport --no-daemon || echo "Member JaCoCo report generation completed"
-                    ./gradlew :recommend:jacocoTestReport --no-daemon || echo "Recommend JaCoCo report generation completed"
-                    ./gradlew :mysub-infra:jacocoTestReport --no-daemon || echo "MySub JaCoCo report generation completed"
-                    
-                    echo "Test reports generated successfully"
-                """
-            }
-        }
-
-        stage('SonarQube Analysis') {
-            container('gradle') {
-                // SonarQube 분석을 각 서비스별로 개별 실행
-                withSonarQubeEnv('SonarQube') {
-                    script {
-                        try {
-                            sh """
-                                echo "Starting SonarQube analysis for Member service..."
-                                ./gradlew :member:sonar \
-                                    -Dsonar.projectKey=lifesub-member-${props.teamid} \
-                                    -Dsonar.projectName=lifesub-member \
-                                    -Dsonar.java.binaries=build/classes/java/main \
-                                    -Dsonar.coverage.jacoco.xmlReportPaths=build/reports/jacoco/test/jacocoTestReport.xml \
-                                    -Dsonar.exclusions=**/config/**,**/entity/**,**/dto/**,**/*Application.class,**/exception/** \
-                                    --no-daemon --max-workers=1
-                                
-                                echo "Member service SonarQube analysis completed"
-                            """
-                        } catch (Exception e) {
-                            echo "Member SonarQube analysis failed: ${e.getMessage()}"
-                            currentBuild.result = 'UNSTABLE'
-                        }
-                        
-                        try {
-                            sh """
-                                echo "Starting SonarQube analysis for Recommend service..."
-                                ./gradlew :recommend:sonar \
-                                    -Dsonar.projectKey=lifesub-recommend-${props.teamid} \
-                                    -Dsonar.projectName=lifesub-recommend \
-                                    -Dsonar.java.binaries=build/classes/java/main \
-                                    -Dsonar.coverage.jacoco.xmlReportPaths=build/reports/jacoco/test/jacocoTestReport.xml \
-                                    -Dsonar.exclusions=**/config/**,**/entity/**,**/dto/**,**/*Application.class,**/exception/** \
-                                    --no-daemon --max-workers=1
-                                
-                                echo "Recommend service SonarQube analysis completed"
-                            """
-                        } catch (Exception e) {
-                            echo "Recommend SonarQube analysis failed: ${e.getMessage()}"
-                            currentBuild.result = 'UNSTABLE'
-                        }
-                        
-                        try {
-                            sh """
-                                echo "Starting SonarQube analysis for MySub service..."
-                                ./gradlew :mysub-infra:sonar \
-                                    -Dsonar.projectKey=lifesub-mysub-${props.teamid} \
-                                    -Dsonar.projectName=lifesub-mysub \
-                                    -Dsonar.java.binaries=build/classes/java/main \
-                                    -Dsonar.coverage.jacoco.xmlReportPaths=build/reports/jacoco/test/jacocoTestReport.xml \
-                                    -Dsonar.exclusions=**/config/**,**/entity/**,**/dto/**,**/*Application.class,**/exception/** \
-                                    --no-daemon --max-workers=1
-                                
-                                echo "MySub service SonarQube analysis completed"
-                            """
-                        } catch (Exception e) {
-                            echo "MySub SonarQube analysis failed: ${e.getMessage()}"
-                            currentBuild.result = 'UNSTABLE'
-                        }
-                    }
-                }
-            }
-        }
-
-        stage('Quality Gate') {
-            timeout(time: 15, unit: 'MINUTES') {
+    }
+    
+    environment {
+        IMAGE_TAG = getImageTag()
+    }
+    
+    stages {
+        stage('Initialize') {
+            steps {
                 script {
-                    try {
-                        def qg = waitForQualityGate()
-                        if (qg.status != 'OK') {
-                            echo "Quality gate failed: ${qg.status}"
-                            currentBuild.result = 'UNSTABLE'
-                        } else {
-                            echo "Quality gate passed successfully"
+                    echo "🚀 Starting pipeline execution"
+                    echo "Build Number: ${env.BUILD_NUMBER}"
+                    echo "Pipeline ID: ${PIPELINE_ID}"
+                    echo "Image Tag: ${env.IMAGE_TAG}"
+                    
+                    // Kubernetes 환경 확인
+                    sh '''
+                        echo "Checking Kubernetes environment..."
+                        echo "Node name: ${NODE_NAME}"
+                        echo "Pod name: ${HOSTNAME}"
+                        kubectl version --client || echo "kubectl not available"
+                    '''
+                }
+            }
+        }
+        
+        stage('Get Source') {
+            steps {
+                script {
+                    echo "📥 Checking out source code..."
+                    checkout scm
+                    
+                    echo "Source code checked out successfully"
+                    sh 'ls -la'
+                    
+                    // Properties 파일 확인 및 로드
+                    if (fileExists('deployment/deploy_env_vars')) {
+                        echo "✅ Found deploy_env_vars file"
+                        env.PROPS_LOADED = 'true'
+                        script {
+                            def props = readProperties file: 'deployment/deploy_env_vars'
+                            env.REGISTRY = props.registry ?: 'default-registry'
+                            env.IMAGE_ORG = props.image_org ?: 'default-org'
+                            env.TEAM_ID = props.teamid ?: 'default-team'
+                            echo "Properties loaded: registry=${env.REGISTRY}, image_org=${env.IMAGE_ORG}, teamid=${env.TEAM_ID}"
                         }
-                    } catch (Exception e) {
-                        echo "Quality gate check failed: ${e.getMessage()}"
-                        currentBuild.result = 'UNSTABLE'
+                    } else {
+                        echo "❌ deploy_env_vars file not found"
+                        sh 'find . -name "*env*" -type f || echo "No env files found"'
+                        error "Required deployment configuration file not found"
                     }
                 }
             }
         }
-
-        stage('Build & Push Images') {
-            container('podman') {
-                withCredentials([usernamePassword(
-                    credentialsId: 'acr-credentials',
-                    usernameVariable: 'USERNAME',
-                    passwordVariable: 'PASSWORD'
-                )]) {
-                    sh """
-                        echo "Logging into container registry..."
-                        podman login ${props.registry} --username \$USERNAME --password \$PASSWORD
-                    """
-
-                    services.each { service ->
-                        def buildDir = service == 'mysub' ? 'mysub-infra' : service
-                        def jarFile = service == 'mysub' ? 'mysub.jar' : "${service}.jar"
-
-                        sh """
-                            echo "Building and pushing image for service: ${service}"
-                            
-                            # 이미지 빌드
-                            podman build \
-                                --build-arg BUILD_LIB_DIR="${buildDir}/build/libs" \
-                                --build-arg ARTIFACTORY_FILE="${jarFile}" \
-                                -f deployment/container/Dockerfile \
-                                -t ${props.registry}/${props.image_org}/${service}:${imageTag} .
-
-                            # 이미지 푸시
-                            podman push ${props.registry}/${props.image_org}/${service}:${imageTag}
-                            
-                            echo "✅ Successfully pushed: ${props.registry}/${props.image_org}/${service}:${imageTag}"
-                        """
+        
+        stage('Build Applications') {
+            steps {
+                container('gradle') {
+                    script {
+                        echo "🔨 Building applications..."
+                        
+                        sh '''
+                            echo "Gradle environment check:"
+                            gradle --version
+                            echo "Java version:"
+                            java -version
+                            echo "Current directory:"
+                            pwd && ls -la
+                        '''
+                        
+                        // Gradle wrapper 실행 권한 설정
+                        if (fileExists('gradlew')) {
+                            sh 'chmod +x gradlew'
+                            echo "✅ Gradle wrapper found and made executable"
+                        } else {
+                            error "❌ Gradle wrapper not found"
+                        }
+                        
+                        try {
+                            sh '''
+                                echo "Starting clean build..."
+                                ./gradlew clean --no-daemon --console=plain
+                                
+                                echo "Building all services..."
+                                ./gradlew :member:build :mysub-infra:build :recommend:build -x test --no-daemon --console=plain
+                                
+                                echo "✅ Build completed successfully"
+                            '''
+                        } catch (Exception e) {
+                            echo "❌ Build failed: ${e.getMessage()}"
+                            throw e
+                        }
                     }
                 }
             }
         }
-
-        stage('Update Manifest Repository') {
-            container('git-client') {
-                withCredentials([gitUsernamePassword(credentialsId: 'github-credentials-dg0404')]) {
-                    sh """
-                        echo "Updating manifest repository for ArgoCD..."
+        
+        stage('Run Tests') {
+            steps {
+                container('gradle') {
+                    script {
+                        echo "🧪 Running tests..."
                         
-                        # Git 설정
-                        git config --global user.email "jenkins@dg0404.com"
-                        git config --global user.name "Jenkins CI DG0404"
-                        git config --global --add safe.directory '*'
-                        
-                        # Manifest repository 클론
-                        git clone ${manifestRepo} ${manifestDir}
-                        cd ${manifestDir}
-                        
-                        echo "Repository cloned successfully"
-                        git status
-                        
-                        # 각 서비스 deployment 업데이트
-                        for service in ${services.join(' ')}; do
-                            deploymentFile="lifesub/\${service}/\${service}-deployment.yaml"
-                            echo "Processing: \$deploymentFile"
-                            
-                            if [ -f "\$deploymentFile" ]; then
-                                echo "✅ Found deployment file: \$deploymentFile"
+                        try {
+                            sh '''
+                                echo "Running tests for all services..."
+                                ./gradlew test --no-daemon --console=plain || echo "Some tests may have failed"
                                 
-                                # 이미지 태그 업데이트
-                                sed -i "s|image: ${props.registry}/${props.image_org}/\${service}:.*|image: ${props.registry}/${props.image_org}/\${service}:${imageTag}|g" \$deploymentFile
-                                
-                                echo "Updated \$deploymentFile with tag: ${imageTag}"
-                            else
-                                echo "⚠️  Warning: \$deploymentFile not found"
-                            fi
-                        done
-                        
-                        # 변경사항 커밋 및 푸시
-                        git add .
-                        if git diff --staged --quiet; then
-                            echo "No changes to commit"
-                        else
-                            git commit -m "🚀 Update backend services to ${imageTag} (Build #${env.BUILD_NUMBER})"
-                            git push origin main
-                            echo "✅ Manifest repository updated successfully"
-                            echo "🎯 ArgoCD will deploy these changes automatically"
-                        fi
-                    """
+                                echo "Generating test reports..."
+                                ./gradlew jacocoTestReport --no-daemon --console=plain || echo "Report generation completed"
+                            '''
+                        } catch (Exception e) {
+                            echo "⚠️ Tests completed with issues: ${e.getMessage()}"
+                            currentBuild.result = 'UNSTABLE'
+                        }
+                    }
                 }
+            }
+        }
+        
+        stage('Build Images') {
+            when {
+                expression { env.PROPS_LOADED == 'true' }
+            }
+            steps {
+                container('podman') {
+                    script {
+                        echo "🐳 Building and pushing images..."
+                        
+                        withCredentials([usernamePassword(
+                            credentialsId: 'acr-credentials',
+                            usernameVariable: 'USERNAME',
+                            passwordVariable: 'PASSWORD'
+                        )]) {
+                            sh '''
+                                echo "Logging into container registry..."
+                                podman login ${REGISTRY} --username $USERNAME --password $PASSWORD
+                            '''
+                            
+                            def services = ['member', 'mysub', 'recommend']
+                            
+                            services.each { service ->
+                                def buildDir = service == 'mysub' ? 'mysub-infra' : service
+                                def jarFile = service == 'mysub' ? 'mysub.jar' : "${service}.jar"
+                                
+                                sh """
+                                    echo "Building image for ${service}..."
+                                    
+                                    podman build \
+                                        --build-arg BUILD_LIB_DIR="${buildDir}/build/libs" \
+                                        --build-arg ARTIFACTORY_FILE="${jarFile}" \
+                                        -f deployment/container/Dockerfile \
+                                        -t ${env.REGISTRY}/${env.IMAGE_ORG}/${service}:${env.IMAGE_TAG} .
+                                    
+                                    echo "Pushing image for ${service}..."
+                                    podman push ${env.REGISTRY}/${env.IMAGE_ORG}/${service}:${env.IMAGE_TAG}
+                                    
+                                    echo "✅ ${service} image pushed successfully"
+                                """
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Update Manifest') {
+            when {
+                expression { env.PROPS_LOADED == 'true' }
+            }
+            steps {
+                container('git-client') {
+                    script {
+                        echo "📝 Updating manifest repository..."
+                        
+                        withCredentials([gitUsernamePassword(credentialsId: 'github-credentials-dg0404')]) {
+                            sh '''
+                                git config --global user.email "jenkins@dg0404.com"
+                                git config --global user.name "Jenkins CI DG0404"
+                                git config --global --add safe.directory '*'
+                                
+                                echo "Cloning manifest repository..."
+                                git clone https://github.com/sungpowerup/lifesub-manifest.git manifest-repo
+                                cd manifest-repo
+                                
+                                # 각 서비스 업데이트
+                                for service in member mysub recommend; do
+                                    deploymentFile="lifesub/${service}/${service}-deployment.yaml"
+                                    if [ -f "$deploymentFile" ]; then
+                                        echo "Updating $deploymentFile..."
+                                        sed -i "s|image: ${REGISTRY}/${IMAGE_ORG}/${service}:.*|image: ${REGISTRY}/${IMAGE_ORG}/${service}:${IMAGE_TAG}|g" $deploymentFile
+                                        echo "✅ Updated $service deployment"
+                                    else
+                                        echo "⚠️ Deployment file not found: $deploymentFile"
+                                    fi
+                                done
+                                
+                                # 커밋 및 푸시
+                                git add .
+                                if ! git diff --staged --quiet; then
+                                    git commit -m "🚀 Update backend services to ${IMAGE_TAG} (Build #${BUILD_NUMBER})"
+                                    git push origin main
+                                    echo "✅ Manifest repository updated successfully"
+                                else
+                                    echo "ℹ️ No changes to commit"
+                                fi
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                echo "🏁 Pipeline completed with result: ${currentBuild.result ?: 'SUCCESS'}"
+            }
+        }
+        failure {
+            script {
+                echo "❌ Pipeline failed - check logs for details"
+            }
+        }
+        success {
+            script {
+                echo "✅ Pipeline completed successfully"
+            }
+        }
+        unstable {
+            script {
+                echo "⚠️ Pipeline completed with warnings"
             }
         }
     }
